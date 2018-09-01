@@ -37,7 +37,11 @@ bool createNewConnection(int epoll_fd, struct epoll_event &ev, int socket_fd){
 }
 
 void read_the_fd(int fd){
-	std::cout<<"reading the "<<fd;
+	char buff[512];
+	int count = read(fd, buff, 512);
+	if(count != 0 && count != -1){
+		std::cout<<buff<<" ";
+	}
 }
 
 int main(int argc, const char *argv[]) {
