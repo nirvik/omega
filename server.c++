@@ -9,7 +9,50 @@
 #include <errno.h>
 #include<sys/epoll.h>
 #include<fcntl.h>
+#include<string.h>
 #define PORT 8000
+#define MAXEVENTS 10
+
+struct Task {
+	void (*func)(int);
+	int param;
+};
+
+Task *createNewTask(void (*func)(int), int param){
+	Task *x = new Task;
+	x->func = func;
+	x->param = param;
+	return x;
+}
+
+class TaskQueue {
+	private:
+		int rear;
+		int front;
+		Task* myq[10000];  // hopefully 10,000 connections
+	public:
+		TaskQueue(){
+			rear = -1;
+			front = -1;
+		}
+
+		void enqueue(Task *task){
+			myq[++front] = task;
+		}
+
+		Task* dequeue() {
+			Task *job = myq[++rear];
+			return job;
+		}
+
+		bool isFull() {
+			
+		}
+
+		bool isEmpty() {
+
+		}
+};
 
 bool setNonBlocking(int fd){
 	int flags = fcntl(fd, F_GETFL);
@@ -36,11 +79,24 @@ bool createNewConnection(int epoll_fd, struct epoll_event &ev, int socket_fd){
 	return true;
 }
 
+
 void read_the_fd(int fd){
 	char buff[512];
 	int count = read(fd, buff, 512);
+	char *reply =
+		"HTTP/1.1 200 OK\n"
+		"Date: Thu, 19 Feb 2009 12:27:04 GMT\n"
+		"Server: Omega/1.0.0\n"
+		"Content-Type: text/html\n"
+		"Content-Length: 22\n"
+		"Accept-Ranges: bytes\n"
+		"Connection: close\n"
+		"\n"
+		"<h1>Hello World !</h1>";
 	if(count != 0 && count != -1){
-		std::cout<<buff<<" ";
+		// std::cout<<buff<<" ";
+		Task *newTask = createNewTask(shitty, fd);
+		send(fd, reply, strlen(reply), 0);
 	}
 }
 
@@ -75,7 +131,7 @@ int main(int argc, const char *argv[]) {
 	if(epoll_fd == -1){
 		std::cout<<"Failed to create epoll instance ";
 	}
-	struct epoll_event ev, events[10];
+	struct epoll_event ev, events[MAXEVENTS];
 	ev.events = EPOLLIN;
 	ev.data.fd = socket_fd;
 
@@ -84,7 +140,7 @@ int main(int argc, const char *argv[]) {
 	}
 
 	for(;;){
-		int nfds = epoll_wait(epoll_fd, events, 10, -1);
+		int nfds = epoll_wait(epoll_fd, events, MAXEVENTS, -1);
 		for(int i=0; i< nfds; i++){
 			if(events[i].data.fd == socket_fd){
 				if(createNewConnection(epoll_fd, ev, socket_fd)){
