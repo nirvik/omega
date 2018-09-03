@@ -154,6 +154,7 @@ int worker(TaskQueue *tq, int thread_id){
 	Task* job = tq->front();
         tq->dequeue();
         if(job == NULL) return 0;
+	while(1);
         int fd = job->param;
         job->func(fd);
 	std::cout<<"Thread-"<<thread_id<<": Serving fd => "<<fd<<"\n";
