@@ -2,16 +2,22 @@
 #include<iostream>
 #include<sys/socket.h>
 #include<sys/types.h>
-#include <stdlib.h>
-#include <cstring>
-#include <netinet/ip.h>
-#include <arpa/inet.h>
-#include <errno.h>
+#include<stdlib.h>
+#include<cstring>
+#include<netinet/ip.h>
+#include<arpa/inet.h>
+#include<errno.h>
 #include<sys/epoll.h>
 #include<fcntl.h>
 #include<string.h>
+#include<thread>
+#include<mutex>
+#include<condition_variable>
+
 #define PORT 8000
 #define MAXEVENTS 10
+#define QUEUE_LIMIT 10000
+#define THREADS 4
 
 struct Task {
 	void (*func)(int);
@@ -25,34 +31,77 @@ Task *createNewTask(void (*func)(int), int param){
 	return x;
 }
 
+std::mutex mtx;
+std::condition_variable cv;
+int waiting_writers = 0;
+int writers = 0;
+int readers = 0;
+
 class TaskQueue {
 	private:
-		int rear;
-		int front;
-		Task* myq[10000];  // hopefully 10,000 connections
+		int _rear;
+		int _front;
+		Task* myq[QUEUE_LIMIT];  // hopefully 10,000 connections
 	public:
 		TaskQueue(){
-			rear = -1;
-			front = -1;
+			_rear = 0;
+			_front = 0;
 		}
 
 		void enqueue(Task *task){
-			myq[++front] = task;
+			waiting_writers++;
+			std::unique_lock<std::mutex> lk(mtx);
+			cv.wait(lk, []() { return (writers == 0);  });
+
+			// critical section
+			writers++;
+			myq[_rear++] = task;
+			_rear = _rear % QUEUE_LIMIT;
+			waiting_writers--;
+			writers--;
+
+
+			cv.notify_all();
 		}
 
-		Task* dequeue() {
-			Task *job = myq[++rear];
-			return job;
-		}
+		void dequeue() {
+			if(isEmpty()) return;
+			waiting_writers++;
+			std::unique_lock<std::mutex> lk(mtx);
+			cv.wait(lk, [&]() { return (writers == 0 && !isEmpty()); });
+			
+			writers++;
+			_front++;
+			_front = _front % QUEUE_LIMIT;
+			waiting_writers--;
+			writers--;
 
-		bool isFull() {
+			cv.notify_all();
 			
 		}
 
-		bool isEmpty() {
+		Task* front() {
+			if(isEmpty()){
+				return NULL;
+			}
+			readers++;
+			std::unique_lock<std::mutex> lk(mtx);
+			cv.wait(lk, [&]() { return (waiting_writers == 0 && writers == 0 && !isEmpty());});
 
+			Task *job = myq[_front];
+			readers--;
+			cv.notify_all();
+
+			return job;
 		}
+	
+		bool isEmpty() {
+			return (_rear == _front);
+		}
+
 };
+
+
 
 bool setNonBlocking(int fd){
 	int flags = fcntl(fd, F_GETFL);
@@ -95,12 +144,28 @@ void read_the_fd(int fd){
 		"<h1>Hello World !</h1>";
 	if(count != 0 && count != -1){
 		// std::cout<<buff<<" ";
-		Task *newTask = createNewTask(shitty, fd);
 		send(fd, reply, strlen(reply), 0);
 	}
+	close(fd);
 }
 
+
+int worker(TaskQueue *tq, int thread_id){
+	Task* job = tq->front();
+        tq->dequeue();
+        if(job == NULL) return 0;
+        int fd = job->param;
+        job->func(fd);
+	std::cout<<"Thread-"<<thread_id<<": Serving fd => "<<fd<<"\n";
+        return 0;
+
+
+}
 int main(int argc, const char *argv[]) {
+
+
+	TaskQueue *tq = new TaskQueue();
+	std::thread threads[THREADS];
 
 	// define the socket
 	int socket_fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
@@ -144,12 +209,22 @@ int main(int argc, const char *argv[]) {
 		for(int i=0; i< nfds; i++){
 			if(events[i].data.fd == socket_fd){
 				if(createNewConnection(epoll_fd, ev, socket_fd)){
-					std::cout<<"Created new connection!\n";
+					// std::cout<<"Created new connection!\n";
 				}
 			} else {
-				read_the_fd(events[i].data.fd);
+				 // read_the_fd(epoll_fd, events[i].data.fd);
+				// add to task queue and deregister fd from epoll
+				epoll_ctl(epoll_fd, EPOLL_CTL_DEL, events[i].data.fd, NULL);
+				tq->enqueue(createNewTask(read_the_fd, events[i].data.fd));
 			}	
-		}	
+		}
+		// start processing all requests in the queue
+		for(int i=0; i< THREADS; i++){
+			threads[i] = std::thread(worker, tq, i+1);
+		}
+		for(int i=0; i<THREADS; i++){
+			threads[i].join();
+		}
 	}
 	return 0;
 }
