@@ -34,6 +34,12 @@ Task *createNewTask(void (*func)(int), int param){
 	return x;
 }
 
+// std::map<std::thread::id, std::pair<std::thread, int>> processing_threads;
+std::map<int, std::thread> processing_threads;
+std::stack<std::pair<std::thread, int>> threadPool;
+std::thread threads[THREADS];
+bool done[THREADS];
+
 std::mutex mtx;
 std::condition_variable cv;
 int waiting_writers = 0;
@@ -92,7 +98,6 @@ class TaskQueue {
 			readers++;
 			std::unique_lock<std::mutex> lk(mtx);
 			cv.wait(lk, [&]() { return (waiting_writers == 0 && writers == 0 && !isEmpty());});
-
 			Task *job = myq[_front];
 			readers--;
 			cv.notify_all();
@@ -155,48 +160,66 @@ void read_the_fd(int fd){
 }
 
 
-int worker(TaskQueue *tq){
+std::mutex done_mtx;
+int done_readers = 0;
+int done_writers = 0;
+int done_waiting_writers = 0;
+
+int worker(TaskQueue *tq, int thread_id){
 	Task* job = tq->front();
         tq->dequeue();
         if(job == NULL) {
 		std::cout<<"No work yet \n";
 		return 0;
-	} else {
-		std::cout<<"Some work yes !\n";
 	}
         int fd = job->param;
         job->func(fd);
+
+	done_waiting_writers++;
+	std::unique_lock<std::mutex> lk(done_mtx);
+	cv.wait(lk, []() { return (done_writers == 0); });
+	done_waiting_writers--;
+	done_writers++;
+	done[thread_id] = true;
+	done_writers--;
+
+	cv.notify_all();
+
         return 0;
 
 
 }
 
-std::map<std::thread::id, std::pair<std::thread, int>> processing_threads;
-std::stack<std::pair<std::thread, int>> threadPool;
-std::thread threads[THREADS];
 
 void backgroundWorkers(TaskQueue *tq){
 
-
 	while(1){
-		std::vector<std::thread::id> keys;
-		std::cout<<"size of the threadpool: "<<threadPool.size()<<" "<<processing_threads.size()<<"\n";
+		std::vector<int> keys;
 		while(!threadPool.empty()){
 			
 			std::pair<std::thread, int> hot_thread = make_pair(move(threadPool.top().first), threadPool.top().second);
 			threadPool.pop();
-			hot_thread.first = std::thread(worker, tq);
-			std::thread::id hot_thread_id = hot_thread.first.get_id();
-			processing_threads[hot_thread_id] = make_pair(move(hot_thread.first), hot_thread.second); 
+			int index = hot_thread.second;
+			hot_thread.first = std::thread(worker, tq, index);
+			//std::thread::id hot_thread_id = hot_thread.first.get_id();
+			//processing_threads[hot_thread_id] = make_pair(move(hot_thread.first), hot_thread.second); 
+			processing_threads[hot_thread.second] = move(hot_thread.first);
 
 		}
 		for(auto &dirs: processing_threads){
-			if(!dirs.second.first.joinable()){
-				int index = dirs.second.second;
+			int index = dirs.first; // dirs.second.second
+			done_readers++;
+			std::unique_lock<std::mutex> lk(done_mtx);
+			cv.wait(lk, [](){return (done_writers == 0 && done_waiting_writers == 0);});
+			if(done[index]){
+				dirs.second.join();
 				threadPool.push(make_pair(move(threads[index]), index));
+				done[index] = false;
+				std::cout<<"Pushing another thread "<<index<<"\n";
 				keys.push_back(dirs.first);
 			}
-			 
+			done_readers--;
+			cv.notify_all();
 		}
 		for(auto key: keys){
 			processing_threads.erase(key);
@@ -210,6 +233,7 @@ int main(int argc, const char *argv[]) {
 	TaskQueue *tq = new TaskQueue();
 	for(int i=0; i < THREADS; i++){
 		threadPool.push(make_pair(move(threads[i]), i));
+		done[i] = false;
 	}
 
 	// define the socket
@@ -262,7 +286,6 @@ int main(int argc, const char *argv[]) {
 				 // read_the_fd(epoll_fd, events[i].data.fd);
 				// add to task queue and deregister fd from epoll
 				epoll_ctl(epoll_fd, EPOLL_CTL_DEL, events[i].data.fd, NULL);
-				std::cout<<"enqueue baby \n";
 				tq->enqueue(createNewTask(read_the_fd, events[i].data.fd));
 			}	
 		}
