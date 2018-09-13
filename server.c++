@@ -10,6 +10,9 @@
 #include<sys/epoll.h>
 #include<fcntl.h>
 #include<string.h>
+#include<map>
+#include<stack>
+#include<vector>
 #include<thread>
 #include<mutex>
 #include<condition_variable>
@@ -81,9 +84,11 @@ class TaskQueue {
 		}
 
 		Task* front() {
+			/*
 			if(isEmpty()){
 				return NULL;
 			}
+			*/
 			readers++;
 			std::unique_lock<std::mutex> lk(mtx);
 			cv.wait(lk, [&]() { return (waiting_writers == 0 && writers == 0 && !isEmpty());});
@@ -150,23 +155,62 @@ void read_the_fd(int fd){
 }
 
 
-int worker(TaskQueue *tq, int thread_id){
+int worker(TaskQueue *tq){
 	Task* job = tq->front();
         tq->dequeue();
-        if(job == NULL) return 0;
-	while(1);
+        if(job == NULL) {
+		std::cout<<"No work yet \n";
+		return 0;
+	} else {
+		std::cout<<"Some work yes !\n";
+	}
         int fd = job->param;
         job->func(fd);
-	std::cout<<"Thread-"<<thread_id<<": Serving fd => "<<fd<<"\n";
         return 0;
 
 
 }
+
+std::map<std::thread::id, std::pair<std::thread, int>> processing_threads;
+std::stack<std::pair<std::thread, int>> threadPool;
+std::thread threads[THREADS];
+
+void backgroundWorkers(TaskQueue *tq){
+
+
+	while(1){
+		std::vector<std::thread::id> keys;
+		std::cout<<"size of the threadpool: "<<threadPool.size()<<" "<<processing_threads.size()<<"\n";
+		while(!threadPool.empty()){
+			
+			std::pair<std::thread, int> hot_thread = make_pair(move(threadPool.top().first), threadPool.top().second);
+			threadPool.pop();
+			hot_thread.first = std::thread(worker, tq);
+			std::thread::id hot_thread_id = hot_thread.first.get_id();
+			processing_threads[hot_thread_id] = make_pair(move(hot_thread.first), hot_thread.second); 
+
+		}
+		for(auto &dirs: processing_threads){
+			if(!dirs.second.first.joinable()){
+				int index = dirs.second.second;
+				threadPool.push(make_pair(move(threads[index]), index));
+				keys.push_back(dirs.first);
+			}
+			 
+		}
+		for(auto key: keys){
+			processing_threads.erase(key);
+		}
+	}
+}
+
 int main(int argc, const char *argv[]) {
 
 
 	TaskQueue *tq = new TaskQueue();
-	std::thread threads[THREADS];
+	for(int i=0; i < THREADS; i++){
+		threadPool.push(make_pair(move(threads[i]), i));
+	}
 
 	// define the socket
 	int socket_fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
@@ -205,6 +249,8 @@ int main(int argc, const char *argv[]) {
 		std::cout<<"Failed to epoll ctl ! ";
 	}
 
+
+	std::thread backgroundThread(backgroundWorkers, tq);
 	for(;;){
 		int nfds = epoll_wait(epoll_fd, events, MAXEVENTS, -1);
 		for(int i=0; i< nfds; i++){
@@ -216,16 +262,17 @@ int main(int argc, const char *argv[]) {
 				 // read_the_fd(epoll_fd, events[i].data.fd);
 				// add to task queue and deregister fd from epoll
 				epoll_ctl(epoll_fd, EPOLL_CTL_DEL, events[i].data.fd, NULL);
+				std::cout<<"enqueue baby \n";
 				tq->enqueue(createNewTask(read_the_fd, events[i].data.fd));
 			}	
 		}
+		/*
 		// start processing all requests in the queue
 		for(int i=0; i< THREADS; i++){
+			if(threads[i].joinable()) threads[i].join();  // still not a good idea
 			threads[i] = std::thread(worker, tq, i+1);
 		}
-		for(int i=0; i<THREADS; i++){
-			threads[i].join();
-		}
+		*/
 	}
 	return 0;
 }
